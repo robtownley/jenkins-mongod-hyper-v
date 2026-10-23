@@ -1,0 +1,23 @@
+{
+  "hyperv_host": "192.168.1.10",
+  "hyperv_user": "YOUR_WINDOWS_ADMIN_USER",
+  "hyperv_port": 22,
+  "host_ssh_key": "/var/lib/jenkins/.ssh/mongo-hyperv-host",
+  "host_known_hosts": "/var/lib/jenkins/mongodb-hyperv/known_hosts",
+  "guest_ssh_key": "/var/lib/jenkins/.ssh/mongo-hyperv-guest",
+  "guest_known_hosts": "/var/lib/jenkins/mongodb-hyperv/guest_known_hosts",
+  "guest_user": "labadmin",
+  "address_network": "192.168.1.0/24",
+  "address_overrides": {},
+  "vm_switch": "YOUR_EXTERNAL_SWITCH_NAME",
+  "vm_root": "D:\\HyperV\\MongoLab",
+  "template_vhdx": "D:\\HyperV\\Templates\\Rocky9-GenericCloud-base.vhdx",
+  "memory_mb": 4096,
+  "vcpus": 2,
+  "disk_gb": 40,
+  "macs": {
+    "mongo1": "00155D710101",
+    "mongo2": "00155D710102",
+    "mongo3": "00155D710103"
+  }
+}

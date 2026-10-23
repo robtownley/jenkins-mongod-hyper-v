@@ -1,0 +1,6 @@
+* text=auto
+*.ps1 text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.j2 text eol=lf
+Jenkinsfile text eol=lf

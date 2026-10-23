@@ -1,0 +1,110 @@
+- name: Discover existing replica configuration
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Check required admin credentials
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'MONGO_ADMIN_USER') | length > 0
+          - lookup('env', 'MONGO_ADMIN_PASSWORD') | length >= 16
+      no_log: true
+    - name: Probe local replica identity without requiring credentials
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: probe
+      register: probe
+      changed_when: false
+    - name: Remember replica identity
+      ansible.builtin.set_fact:
+        replica_initialized: "{{ 'INITIALIZED' in probe.stdout }}"
+
+- name: Bootstrap only an entirely new replica set
+  hosts: mongo1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Initiate once, never force-reconfigure an existing set
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: initiate
+      when: not (hostvars['mongo1'].replica_initialized or hostvars['mongo2'].replica_initialized or hostvars['mongo3'].replica_initialized)
+      changed_when: true
+
+- name: Find the current elected primary
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for election
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: primary
+      register: election
+      changed_when: false
+      failed_when: false
+    - name: Add primary to runtime group
+      ansible.builtin.group_by:
+        key: "{{ 'elected_primary' if election.rc == 0 else 'other_members' }}"
+
+- name: Ensure primary was found
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require one primary; rerun after election if none is ready
+      ansible.builtin.assert:
+        that: groups.get('elected_primary', []) | length == 1
+        fail_msg: No unique primary found. Wait a few seconds then rerun APPLY; never force-initiate an existing set.
+
+- name: Create first admin and verify writes
+  hosts: elected_primary
+  become: true
+  gather_facts: false
+  environment:
+    MONGO_ADMIN_USER: "{{ lookup('env', 'MONGO_ADMIN_USER') }}"
+    MONGO_ADMIN_PASSWORD: "{{ lookup('env', 'MONGO_ADMIN_PASSWORD') }}"
+    LAB_TOKEN: "{{ lookup('env', 'LAB_TOKEN') }}"
+  tasks:
+    - name: Ensure initial admin exists without resetting existing passwords
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: user
+      no_log: true
+      register: user_result
+      changed_when: "'CREATED' in user_result.stdout"
+    - name: Verify topology and acknowledged write on all three members
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: write
+      register: verify
+      until: verify.rc == 0
+      retries: 120
+      delay: 5
+      changed_when: true
+      no_log: true
+
+- name: Verify the document locally on each member
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Confirm local replication
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: read
+        MONGO_ADMIN_USER: "{{ lookup('env', 'MONGO_ADMIN_USER') }}"
+        MONGO_ADMIN_PASSWORD: "{{ lookup('env', 'MONGO_ADMIN_PASSWORD') }}"
+        LAB_TOKEN: "{{ lookup('env', 'LAB_TOKEN') }}"
+      register: local_read
+      until: local_read.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+      no_log: true

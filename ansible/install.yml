@@ -1,0 +1,211 @@
+- name: Prepare all members and shared name resolution
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH and cloud-init
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+    - name: Wait for cloud-init package operations
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ mongo_hostname }}"
+    - name: Resolve every replica member by its private address
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} JENKINS MONGODB LAB"
+        block: |
+          {% for node in groups['mongodb'] %}
+          {{ hostvars[node].private_ip }} {{ hostvars[node].mongo_hostname }} {{ node }}
+          {% endfor %}
+    - name: Gather OS and kernel information
+      ansible.builtin.setup:
+        gather_subset: [min]
+    - name: Require Rocky Linux 9 and its stock 5.14 kernel series
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Rocky'
+          - ansible_facts['distribution_major_version'] == '9'
+          - ansible_facts['architecture'] == 'x86_64'
+          - ansible_facts['kernel'] is match('^5[.]14[.]')
+        fail_msg: Select an official Rocky Linux 9 Base x86_64 image with its stock 5.14 kernel. No kernel or bootloader changes are performed.
+    - name: Install repository and SELinux prerequisites
+      ansible.builtin.dnf:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - make
+          - checkpolicy
+          - policycoreutils
+          - policycoreutils-python-utils
+          - selinux-policy-devel
+          - python3-libselinux
+        state: present
+        lock_timeout: 300
+    - name: Install MongoDB RPM signing key
+      ansible.builtin.rpm_key:
+        key: https://pgp.mongodb.com/server-8.0.asc
+        state: present
+    - name: Configure official MongoDB 8.0 EL9 repository
+      ansible.builtin.yum_repository:
+        name: mongodb-org-8.0
+        description: MongoDB 8.0 Repository
+        baseurl: https://repo.mongodb.org/yum/redhat/9/mongodb-org/8.0/x86_64/
+        gpgcheck: true
+        enabled: true
+        gpgkey: https://pgp.mongodb.com/server-8.0.asc
+    - name: Install MongoDB and shell
+      ansible.builtin.dnf:
+        name: mongodb-org
+        state: present
+        update_cache: true
+        lock_timeout: 300
+    - name: Fetch official MongoDB SELinux policy at a reviewed commit
+      ansible.builtin.git:
+        repo: https://github.com/mongodb/mongodb-selinux.git
+        dest: /usr/local/src/mongodb-selinux
+        version: 18181652362a46fd4511a56f20c4055712deb252
+    - name: Build official SELinux policy
+      ansible.builtin.command:
+        argv: [make]
+        chdir: /usr/local/src/mongodb-selinux
+        creates: /usr/local/src/mongodb-selinux/build/targeted/mongodb.pp
+    - name: Install official SELinux policy
+      ansible.builtin.command:
+        argv: [make, install]
+        chdir: /usr/local/src/mongodb-selinux
+        creates: /usr/local/src/mongodb-selinux/.installed-18181652362a46fd4511a56f20c4055712deb252
+      register: selinux_policy_install
+    - name: Record installed SELinux policy revision
+      ansible.builtin.copy:
+        content: "18181652362a46fd4511a56f20c4055712deb252\n"
+        dest: /usr/local/src/mongodb-selinux/.installed-18181652362a46fd4511a56f20c4055712deb252
+        owner: root
+        group: root
+        mode: '0644'
+      when: selinux_policy_install.changed
+    - name: Discover firewall service
+      ansible.builtin.service_facts:
+    - name: Allow MongoDB through active firewalld
+      when:
+        - "'firewalld.service' in ansible_facts.services"
+        - "ansible_facts.services['firewalld.service'].state == 'running'"
+      block:
+        - name: Check persistent MongoDB port rule
+          ansible.builtin.command: firewall-cmd --permanent --query-port=27017/tcp
+          register: firewall_permanent
+          changed_when: false
+          failed_when: firewall_permanent.rc not in [0, 1]
+        - name: Persist MongoDB port rule
+          ansible.builtin.command: firewall-cmd --permanent --add-port=27017/tcp
+          when: firewall_permanent.rc == 1
+          changed_when: true
+        - name: Check runtime MongoDB port rule
+          ansible.builtin.command: firewall-cmd --query-port=27017/tcp
+          register: firewall_runtime
+          changed_when: false
+          failed_when: firewall_runtime.rc not in [0, 1]
+        - name: Apply runtime MongoDB port rule
+          ansible.builtin.command: firewall-cmd --add-port=27017/tcp
+          when: firewall_runtime.rc == 1
+          changed_when: true
+
+- name: Configure and restart members one at a time
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Validate persistent shared key
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'MONGO_KEYFILE') is match('^[A-Za-z0-9+/=]{6,1024}$')
+        fail_msg: Use the same single-line base64 key on every run.
+      no_log: true
+    - name: Prepare standard RPM data and log paths
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongod
+        group: mongod
+        mode: '0750'
+      loop: [/var/lib/mongo, /var/log/mongodb]
+    - name: Prepare private key directory inside SELinux-labelled data path
+      ansible.builtin.file:
+        path: /var/lib/mongo/internal-auth
+        state: directory
+        owner: mongod
+        group: mongod
+        mode: '0700'
+    - name: Write internal authentication key
+      ansible.builtin.copy:
+        content: "{{ lookup('env', 'MONGO_KEYFILE') }}"
+        dest: /var/lib/mongo/internal-auth/keyfile
+        owner: mongod
+        group: mongod
+        mode: '0400'
+      no_log: true
+      notify: Restart MongoDB
+    - name: Write MongoDB configuration
+      ansible.builtin.template:
+        src: mongod.conf.j2
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart MongoDB
+    - name: Restore default SELinux labels for RPM paths and private key
+      ansible.builtin.command:
+        argv: [restorecon, -RF, /var/lib/mongo, /var/log/mongodb, /etc/mongod.conf, /usr/bin/mongod, /usr/lib/systemd/system/mongod.service]
+      changed_when: false
+    - name: Apply configuration
+      ansible.builtin.meta: flush_handlers
+    - name: Ensure MongoDB starts on boot
+      ansible.builtin.systemd_service:
+        name: mongod
+        state: started
+        enabled: true
+    - name: Check listener and show startup diagnostics if it fails
+      block:
+        - name: Wait for local listener
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 27017
+            timeout: 120
+      rescue:
+        - name: Read MongoDB service journal
+          ansible.builtin.command: journalctl -u mongod -n 60 --no-pager
+          register: startup_journal
+          changed_when: false
+        - name: Show MongoDB service journal
+          ansible.builtin.debug:
+            var: startup_journal.stdout_lines
+        - name: Stop because MongoDB did not start
+          ansible.builtin.fail:
+            msg: MongoDB is not listening; review the service journal above.
+    - name: Install cluster helper
+      ansible.builtin.copy:
+        src: cluster.js
+        dest: /usr/local/lib/mongodb-lab-cluster.js
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Wait for existing member to be ready before touching next node
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+      environment:
+        LAB_PHASE: ready
+      register: ready
+      until: ready.rc == 0
+      retries: 120
+      delay: 5
+      changed_when: false
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.systemd_service:
+        name: mongod
+        state: restarted

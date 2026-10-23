@@ -1,0 +1,11 @@
+config/lab.json
+.venv/
+__pycache__/
+build/
+*.qcow2
+*.vhdx
+*.iso
+*.pem
+*.key
+
+*.zip

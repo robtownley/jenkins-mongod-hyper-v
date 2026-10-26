@@ -20,12 +20,35 @@ if (phase === 'probe') {
   requireOK(admin.runCommand({replSetInitiate: {
     _id: 'rs0', members: hosts.map((host, i) => ({_id: i, host}))
   }}));
-} else if (phase === 'primary') {
-  let elected = hello;
-  for (let attempt = 0; !elected.primary && attempt < 60; attempt++) {
-    sleep(2000); elected = requireOK(admin.runCommand({hello: 1}));
+} else if (phase === 'discover-primary') {
+  // A member can advertise a primary before it is writable. Probe all members
+  // directly and wait for one consistent, writable-primary view.
+  let snapshot = [];
+  let found = false;
+  for (let round = 0; round < 30; round++) {
+    snapshot = hosts.map((host, index) => {
+      try {
+        const connection = new Mongo('mongodb://' + host +
+          '/?directConnection=true&serverSelectionTimeoutMS=3000&connectTimeoutMS=3000&socketTimeoutMS=3000');
+        const h = requireOK(connection.getDB('admin').runCommand({hello: 1}));
+        return {node: 'mongo' + (index + 1), host, setName: h.setName || null,
+          writable: h.isWritablePrimary === true, secondary: h.secondary === true,
+          primary: h.primary || null, me: h.me || null};
+      } catch (e) {
+        return {node: 'mongo' + (index + 1), host, error: String(e.message || e)};
+      }
+    });
+    const writers = snapshot.filter(member => member.writable);
+    if (writers.length === 1 && snapshot.every(member =>
+        !member.error && member.setName === 'rs0' &&
+        member.primary === writers[0].host && (member.writable || member.secondary))) {
+      print(JSON.stringify({primary_node: writers[0].node, members: snapshot}));
+      found = true;
+      break;
+    }
+    sleep(2000);
   }
-  if (!elected.isWritablePrimary) quit(1);
+  if (!found) throw new Error('No consistent writable primary after election wait: ' + JSON.stringify(snapshot));
 } else if (phase === 'user') {
   // This is only executed locally on the elected primary. The localhost
   // exception allows first-user creation; wrong existing secrets fail closed.

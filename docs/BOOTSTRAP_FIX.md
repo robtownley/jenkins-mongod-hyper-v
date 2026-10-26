@@ -26,3 +26,7 @@ Validation: controller/repair unit tests cover the old failure, successful repai
 ## Install-step update
 
 The update ZIP also replaces the silent MongoDB DNF task with a logged, IPv4-only, lock-aware installer. Package preparation is serial, and Ansible polls the MongoDB job every 15 seconds. On timeout/failure it reports diagnostics. Existing active package transactions are not killed, and guests are not rebooted/rebuilt automatically. Stop the previous Jenkins build before retrying; aborting a build does not guarantee that a previously launched DNF process has stopped inside a guest.
+
+## Election-readiness update
+
+The original per-node election check stopped as soon as a primary name appeared, even while that member was not writable. A fresh set could therefore fail the unique-primary assertion. The new coordinated probe waits for one writable primary and consistent member responses, selects exactly one existing inventory host and prints per-member details on timeout. Rerun APPLY after pushing the update; do not DESTROY or force-initiate the existing set. The hypothesis addresses a real readiness race in the prior code; a remaining network/election failure will be shown by the new diagnostics.

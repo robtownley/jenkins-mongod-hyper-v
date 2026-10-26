@@ -34,31 +34,42 @@
       when: not (hostvars['mongo1'].replica_initialized or hostvars['mongo2'].replica_initialized or hostvars['mongo3'].replica_initialized)
       changed_when: true
 
-- name: Find the current elected primary
-  hosts: mongodb
+- name: Wait for a consistent writable primary across the replica set
+  hosts: mongo1
   become: true
   gather_facts: false
   tasks:
-    - name: Wait for election
-      ansible.builtin.command:
-        argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
-      environment:
-        LAB_PHASE: primary
-      register: election
-      changed_when: false
-      failed_when: false
-    - name: Add primary to runtime group
-      ansible.builtin.group_by:
-        key: "{{ 'elected_primary' if election.rc == 0 else 'other_members' }}"
-
-- name: Ensure primary was found
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Require one primary; rerun after election if none is ready
+    - name: Discover one writable primary with bounded direct member probes
+      block:
+        - name: Wait for replica election and writable-primary readiness
+          ansible.builtin.command:
+            argv: [mongosh, --quiet, --host, 127.0.0.1, --file, /usr/local/lib/mongodb-lab-cluster.js]
+          environment:
+            LAB_PHASE: discover-primary
+          timeout: 420
+          register: election
+          changed_when: false
+      rescue:
+        - name: Show the final election probe result
+          ansible.builtin.debug:
+            msg:
+              stdout: "{{ election.stdout | default('No probe output returned') }}"
+              stderr: "{{ election.stderr | default('Probe failed before output') }}"
+              rc: "{{ election.rc | default('unknown') }}"
+        - name: Stop if no stable writable primary was found
+          ansible.builtin.fail:
+            msg: Election did not become ready. Review the per-member probe results above; no replica configuration was reset.
+    - name: Validate elected inventory member
       ansible.builtin.assert:
-        that: groups.get('elected_primary', []) | length == 1
-        fail_msg: No unique primary found. Wait a few seconds then rerun APPLY; never force-initiate an existing set.
+        that:
+          - (election.stdout | from_json).primary_node in groups['mongodb']
+    - name: Add the elected writable member to the runtime group
+      ansible.builtin.add_host:
+        name: "{{ (election.stdout | from_json).primary_node }}"
+        groups: elected_primary
+    - name: Report elected primary and member readiness
+      ansible.builtin.debug:
+        msg: "{{ election.stdout | from_json }}"
 
 - name: Create first admin and verify writes
   hosts: elected_primary

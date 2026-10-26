@@ -69,6 +69,7 @@ pipeline {
             steps { sh '"$ANSIBLE" -i build/inventory.json ansible/repair_bootstrap.yml' }
         }
         stage('Install MongoDB and verify replica set') {
+            options { timeout(time: 75, unit: 'MINUTES') }
             when { expression { params.ACTION == 'APPLY' } }
             steps {
                 withCredentials([
@@ -78,7 +79,7 @@ pipeline {
                     sh '''
                         set +x
                         set -eu
-                        "$ANSIBLE" -i build/inventory.json ansible/install.yml
+                        "$ANSIBLE" -T 20 -i build/inventory.json ansible/install.yml
                         "$ANSIBLE" -i build/inventory.json ansible/configure.yml
                     '''
                 }

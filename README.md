@@ -62,6 +62,14 @@ Use dedicated Jenkins IDs `mongodb-hyperv-keyfile` (Secret text) and `mongodb-hy
 
 Bootstrap uses the localhost exception only on a new replica set, then authenticates on reruns. Each successful APPLY verifies exactly one primary/two healthy secondaries, writes a build-token document with `w:3`, and reads it locally from all three nodes. All VMs share one physical host, so this demonstrates member failover, not resilience to a host failure. No backup system or TLS is configured. Port 27017 is enabled in active guest firewalld for LAN use; keep the lab on your trusted LAN and do not port-forward it.
 
+## Package installation behaviour
+
+Preparation and package installation run one VM at a time. DNF uses IPv4, 30-second network/low-speed timeouts, two retries and immediate lock-conflict failure. The MongoDB repo is probed over IPv4 before installation; DNF output is logged to `/var/log/mongodb-hyperv-install.log` and the job is polled every 15 seconds. A supervisor fails after 15 minutes rather than silently waiting indefinitely. It does not forcibly kill an active RPM transaction; a running child retains its lock/log, and DNF's own lock check also rejects conflicts.
+
+Failed installs attempt to print install/DNF logs, process states and queued systemd jobs. Guest SSH has keepalives, a 20-second connection timeout and bounded ordinary tasks. Long bootstrap/install tasks have explicit larger limits; the installation/configuration Jenkins stage has a 75-minute outer limit for the three serial guests and replication checks. These changes cannot revive an already blocked SSH/PAM/systemd guest. No VM/host reboot, disk replacement, RPM lock deletion or forced package-process killing is performed.
+
+The actual cause of the reported DNF/SSH stall remains unconfirmed. Network, lock, transaction and guest-state failures should now produce bounded failures and diagnostics. Full behaviour still requires validation on the user's host.
+
 ## Connect and troubleshoot
 
 Jenkins archives `build/nodes.txt` and `build/nodes.json` with current addresses.

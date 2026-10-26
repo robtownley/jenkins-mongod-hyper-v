@@ -22,3 +22,7 @@ Run Jenkins ACTION=APPLY and review the plan. Existing running VMs should show K
 MAC-based ARP fallback is limited to the directly connected configured IPv4 LAN, up to 1024 addresses. For your 192.168.1.0/24 LAN it sends small UDP probes to populate the local neighbor table, then uses only entries matching the expected running VM MACs. If your Jenkins VM cannot see the guests on that LAN, use DHCP-reservation addresses in `address_overrides` instead.
 
 Validation: controller/repair unit tests cover the old failure, successful repair, preserving errors when repair fails, rejection of unrelated errors/scripts, no-op healthy reruns, executable backup handling, MAC filtering, stale-IP ambiguity and corrected seed generation. Ansible syntax and existing MongoDB helper checks also run. Full execution on your Hyper-V host remains to be verified by your next APPLY.
+
+## Install-step update
+
+The update ZIP also replaces the silent MongoDB DNF task with a logged, IPv4-only, lock-aware installer. Package preparation is serial, and Ansible polls the MongoDB job every 15 seconds. On timeout/failure it reports diagnostics. Existing active package transactions are not killed, and guests are not rebooted/rebuilt automatically. Stop the previous Jenkins build before retrying; aborting a build does not guarantee that a previously launched DNF process has stopped inside a guest.

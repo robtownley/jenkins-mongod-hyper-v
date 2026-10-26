@@ -26,6 +26,7 @@ pipeline {
                     command -v scp
                     command -v genisoimage
                     python3 -m unittest discover -s tests -v
+                    "$ANSIBLE" -i localhost, ansible/repair_bootstrap.yml --syntax-check
                     "$ANSIBLE" -i localhost, ansible/install.yml --syntax-check
                     "$ANSIBLE" -i localhost, ansible/configure.yml --syntax-check
                 '''
@@ -62,6 +63,10 @@ pipeline {
                 sh 'python3 scripts/lab.py discover'
                 archiveArtifacts artifacts: 'build/nodes.json,build/nodes.txt', fingerprint: true
             }
+        }
+        stage('Repair guest bootstrap and verify cloud-init') {
+            when { expression { params.ACTION == 'APPLY' } }
+            steps { sh '"$ANSIBLE" -i build/inventory.json ansible/repair_bootstrap.yml' }
         }
         stage('Install MongoDB and verify replica set') {
             when { expression { params.ACTION == 'APPLY' } }

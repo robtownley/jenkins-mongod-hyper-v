@@ -40,11 +40,21 @@ The VM MACs default to:
 
 Confirm these do not collide with existing adapters; choose different addresses before first APPLY if needed. Reserve addresses on your router for reliable MongoDB networking. DHCP is still used; no static IP is configured inside the guests. Hyper-V KVP reports the addresses; the controller accepts one IPv4 per node inside your configured LAN subnet. There is a 15-minute discovery timeout.
 
-Guests install `hyperv-daemons` on first boot. If KVP cannot report an address, inspect the router/guest console and add that node's **DHCP reservation** to `address_overrides` in the local config. This is only a discovery fallback, not a static guest-network setting.
+Guests install `hyperv-daemons` on first boot. The seed reloads udev rules, re-registers the existing KVP device and **starts** its static service (it does not try to enable it). For VMs created by the original seed, discovery can fall back to Linux's ARP table: the controller sends small unprivileged UDP probes within the configured directly connected LAN, then accepts only resolved addresses matching the owned VMs' expected MACs. This requires Jenkins on the same subnet and a network of /22 or smaller; no extra package/sudo permission is required. It never accepts an arbitrary responding host.
+
+If neither KVP nor LAN neighbor discovery can report addresses, inspect router leases and add the nodes' **DHCP reservations** to `address_overrides`. This is a discovery fallback, not a static guest-network setting.
 
 MongoDB member names are `mongo1.mongodb.home.arpa`, `mongo2.mongodb.home.arpa`, `mongo3.mongodb.home.arpa`. Ansible maps these names to discovered LAN addresses on **all three guests** before configuration. The project does not create DNS records on your router. For home clients/Compass replica discovery, add equivalent records to your local DNS or client hosts file. Direct connections can use the discovered IP and `directConnection=true`.
 
 A changing lease during active operation can interrupt replication because `/etc/hosts` is reconciled on APPLY, not continuously. Use reservations. Recreating a node with the same reserved IP legitimately changes its SSH host key; the controller removes only that freshly created node's address from the dedicated guest known_hosts file. Existing-node host key changes still fail.
+
+## Repair existing KVP/cloud-init failures
+
+APPLY runs `ansible/repair_bootstrap.yml` after address discovery and before the main installation playbook. It waits for cloud-init to finish, recognizes the original one-command KVP seed or the corrected script, reloads/triggers udev and verifies that `hypervkvpd` is active. Known executable `runcmd.backup` files left by the manual workaround are moved out of the scripts directory.
+
+If cloud-init still records only the diagnosed `scripts_user`/`runcmd` error, the helper backs up the original script/status under `/var/lib/mongodb-hyperv-bootstrap-backups`, verifies the repaired script, resets only that stale final-stage record and reruns/verifies cloud-final. It refuses unrelated stage errors, unknown runcmd contents, or other executable user scripts. Healthy repaired nodes are skipped on later builds. It does not clean cloud-init, reset users/keys, reboot or recreate the VMs.
+
+Existing VMs are repaired over SSH; changing the future seed does not require a VM rebuild. The Windows management script is unchanged in this update, so it does not need reinstalling. See [docs/BOOTSTRAP_FIX.md](docs/BOOTSTRAP_FIX.md).
 
 ## MongoDB credentials and verification
 
@@ -89,6 +99,7 @@ Local validation:
 python3 -m unittest discover -s tests -v
 node tests/test_cluster.js                      # optional Node.js
 pwsh -NoProfile -File tests/test_windows.ps1    # optional PowerShell 7; mocks only
+ansible-playbook -i localhost, ansible/repair_bootstrap.yml --syntax-check
 ansible-playbook -i localhost, ansible/install.yml --syntax-check
 ansible-playbook -i localhost, ansible/configure.yml --syntax-check
 ```

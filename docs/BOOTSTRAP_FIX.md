@@ -1,0 +1,24 @@
+# Update the existing Hyper-V lab without rebuilding VMs
+
+The original seed installed the Hyper-V daemons after the KVP device already existed, then attempted to enable/start a static service. This caused a missing systemd device dependency and a cloud-init `scripts_user` failure. Reloading the new udev rule and triggering the KVP device fixes startup. Cloud-init 24.4 also retains the old final-stage error on a retry, so recovery needs to preserve the evidence and reset only that known stale record after verifying the underlying fix.
+
+This update fixes new seeds and repairs existing VMs through Jenkins. Windows `Manage-Lab.ps1`, the VM configuration identity, disks, MACs, keys and template are unchanged. The installed Windows script does not need updating.
+
+On the Mac, from the existing Git checkout:
+
+```bash
+cd ~/jenkins-mongod-hyper-v
+unzip -o ~/Downloads/jenkins-mongodb-hyperv.zip
+git add .
+git diff --cached --stat
+git commit -m "Repair Hyper-V KVP and cloud-init bootstrap in pipeline"
+git push
+```
+
+The ZIP is flat: its files are placed directly in the current Git checkout, not a nested directory. Host-specific Jenkins configuration stays outside this checkout.
+
+Run Jenkins ACTION=APPLY and review the plan. Existing running VMs should show Keep. The pipeline discovers their DHCP addresses (KVP or MAC-verified ARP), runs the bootstrap repair on all three, then continues installing/configuring MongoDB. No manual guest repair is required for the diagnosed failure. If a VM has unrelated cloud-init errors or unknown scripts, the pipeline stops with the reason rather than clearing them.
+
+MAC-based ARP fallback is limited to the directly connected configured IPv4 LAN, up to 1024 addresses. For your 192.168.1.0/24 LAN it sends small UDP probes to populate the local neighbor table, then uses only entries matching the expected running VM MACs. If your Jenkins VM cannot see the guests on that LAN, use DHCP-reservation addresses in `address_overrides` instead.
+
+Validation: controller/repair unit tests cover the old failure, successful repair, preserving errors when repair fails, rejection of unrelated errors/scripts, no-op healthy reruns, executable backup handling, MAC filtering, stale-IP ambiguity and corrected seed generation. Ansible syntax and existing MongoDB helper checks also run. Full execution on your Hyper-V host remains to be verified by your next APPLY.

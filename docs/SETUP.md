@@ -180,6 +180,6 @@ These are MongoDB users/secrets, separate from the Windows SSH account and Linux
 
 Create a **new** Pipeline job, e.g. `mongodb-hyperv-lab`, Pipeline script from SCM → your new Git repository → branch `*/main` → Script Path `Jenkinsfile`. Run it only on the existing Linux Jenkins runner containing these tools/config/keys. With multiple Jenkins agents, change `agent any` to the label of that runner.
 
-Run PLAN first. Expect only `mongo-hv-mongo1/2/3: Create`. APPLY repeats the plan, asks for review, copies disks/seeds, starts VMs, polls for DHCP/KVP (up to 15 minutes), then runs Ansible and replication checks. It does not reboot or stop the Windows host/Jenkins VM.
+Run PLAN first. Expect only `mongo-hv-mongo1/2/3: Create`. APPLY repeats the plan, asks for review, copies disks/seeds, starts VMs, polls for DHCP/KVP (up to 15 minutes, with MAC-verified local ARP fallback), repairs the recognized legacy KVP/cloud-init failure if present, then runs MongoDB Ansible configuration and replication checks. It does not reboot or stop the Windows host/Jenkins VM.
 
 For repeated APPLY, expect Keep operations; the same VM data is preserved. DESTROY requires its own plan/review and powers off/deletes the three owned VM directories, including data. Root ownership marker and shared template remain. The AWS project and its state are not contacted.

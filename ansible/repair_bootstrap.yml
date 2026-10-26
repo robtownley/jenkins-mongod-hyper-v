@@ -1,0 +1,32 @@
+- name: Repair the known Hyper-V KVP cloud-init failure on existing guests
+  hosts: mongodb
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for guest SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+    - name: Create bootstrap helper directory
+      ansible.builtin.file:
+        path: /usr/local/lib/mongodb-hyperv
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+    - name: Install bootstrap repair helpers
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/usr/local/lib/mongodb-hyperv/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: [repair_bootstrap.py, kvp-start.sh]
+    - name: Repair only the recognized bootstrap error and verify completion
+      ansible.builtin.command:
+        argv: [python3, /usr/local/lib/mongodb-hyperv/repair_bootstrap.py]
+      register: bootstrap_repair
+      changed_when: (bootstrap_repair.stdout | from_json).changed
+    - name: Report bootstrap health
+      ansible.builtin.debug:
+        msg: "{{ (bootstrap_repair.stdout | from_json).message }}"

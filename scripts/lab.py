@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -127,7 +128,7 @@ def seed_documents(config, node):
         'growpart': {'mode': 'auto', 'devices': ['/'], 'ignore_growroot_disabled': False},
         'resize_rootfs': True,
         'packages': ['hyperv-daemons'],
-        'runcmd': [['systemctl', 'enable', '--now', 'hypervkvpd.service']],
+        'runcmd': [['sh', '-ec', (ROOT / 'ansible/files/kvp-start.sh').read_text()]],
     }
     mac = ':'.join(config['macs'][node][i:i+2].lower() for i in range(0, 12, 2))
     network = {'version': 2, 'ethernets': {'eth0': {
@@ -184,6 +185,71 @@ def pick_addresses(config, status):
     if len({item['private_ip'] for item in result.values()}) != 3:
         raise ValueError('Duplicate guest IP addresses')
     return result
+
+
+
+def arp_addresses(config, status, text):
+    """Accept only resolved ARP entries matching the owned VMs' configured MACs."""
+    network = ipaddress.IPv4Network(config['address_network'])
+    result = {node: [] for node in NODES}
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 6:
+            continue
+        try:
+            ip = ipaddress.IPv4Address(fields[0])
+            flags = int(fields[2], 16)
+        except ValueError:
+            continue
+        if ip not in network or not flags & 2:
+            continue
+        mac = fields[3].replace(':', '').upper()
+        for node in NODES:
+            if (mac == config['macs'][node] == status[node]['mac'].upper()
+                    and status[node]['state'] == 'Running'):
+                result[node].append(str(ip))
+    return {node: sorted(set(values)) for node, values in result.items()}
+
+
+def probe_lan(config):
+    """Unprivileged UDP probes populate Linux ARP for this directly connected LAN.
+
+    No root/raw socket/arp-scan dependency. Limit to <=1024 addresses; only the
+    project's expected MACs will be accepted from the resulting neighbor table.
+    """
+    network = ipaddress.IPv4Network(config['address_network'])
+    if network.num_addresses > 1024:
+        raise ValueError('ARP bootstrap fallback requires a LAN subnet of /22 or smaller')
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        route.connect((str(network.network_address + 1), 65500))
+        if ipaddress.IPv4Address(route.getsockname()[0]) not in network:
+            raise ValueError('ARP bootstrap requires Jenkins on the same LAN; use DHCP reservation address_overrides for routed networks')
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setblocking(False)
+        for ip in network.hosts():
+            try:
+                sock.sendto(b'\x00', (str(ip), 65500))
+            except OSError:
+                pass
+
+
+def with_arp_fallback(config, status, text):
+    addresses = arp_addresses(config, status, text)
+    merged = {node: dict(item, ips=list(item['ips'])) for node, item in status.items()}
+    network = ipaddress.IPv4Network(config['address_network'])
+    for node in NODES:
+        if node in config['address_overrides']:
+            continue
+        usable = []
+        for value in merged[node]['ips']:
+            try:
+                if ipaddress.IPv4Address(value) in network:
+                    usable.append(value)
+            except ValueError:
+                continue
+        if not usable:
+            merged[node]['ips'] = addresses[node]
+    return merged
 
 
 def inventory(config, nodes):
@@ -243,12 +309,27 @@ def main():
     else:
         deadline = time.monotonic() + 900
         last_message = ''
+        next_probe = time.monotonic() + 30
         while True:
             status = call_host(config, request(config, 'STATUS'))
             try:
                 nodes = pick_addresses(config, status)
                 break
             except ValueError as exc:
+                # KVP itself may be the failed first-boot step. Discover the same
+                # owned MACs on the local LAN so Ansible can repair the guest.
+                if Path('/proc/net/arp').exists():
+                    try:
+                        recovered = with_arp_fallback(config, status, Path('/proc/net/arp').read_text())
+                        nodes = pick_addresses(config, recovered)
+                        print('Using MAC-verified LAN neighbor addresses for bootstrap repair', flush=True)
+                        break
+                    except ValueError:
+                        pass
+                    if time.monotonic() >= next_probe:
+                        print('Refreshing local LAN neighbors to find the three expected VM MACs', flush=True)
+                        probe_lan(config)
+                        next_probe = time.monotonic() + 30
                 message = str(exc)
                 if message != last_message:
                     print(message, flush=True)

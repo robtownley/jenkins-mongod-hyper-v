@@ -116,3 +116,50 @@ class LabTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ArpFallbackTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = json.loads((ROOT/'config/lab.example.json').read_text())
+        self.status = {node:{'mac':self.cfg['macs'][node], 'state':'Running', 'ips':[],
+                             'vm_id':str(i), 'vm_name':'mongo-hv-'+node}
+                       for i,node in enumerate(lab.NODES,1)}
+        self.arp = '''IP address HW type Flags HW address Mask Device
+192.168.1.37 0x1 0x2 00:15:5d:71:01:01 * eth0
+192.168.1.38 0x1 0x2 00:15:5d:71:01:02 * eth0
+192.168.1.39 0x1 0x2 00:15:5d:71:01:03 * eth0
+192.168.1.50 0x1 0x2 aa:bb:cc:dd:ee:ff * eth0
+'''
+
+    def test_mac_matched_addresses_allow_existing_node_repair(self):
+        status = lab.with_arp_fallback(self.cfg,self.status,self.arp)
+        nodes = lab.pick_addresses(self.cfg,status)
+        self.assertEqual(nodes['mongo1']['private_ip'],'192.168.1.37')
+        self.assertEqual(nodes['mongo3']['private_ip'],'192.168.1.39')
+
+    def test_unresolved_arp_entries_ignored(self):
+        arp = self.arp.replace('192.168.1.37 0x1 0x2','192.168.1.37 0x1 0x0')
+        self.assertEqual(lab.arp_addresses(self.cfg,self.status,arp)['mongo1'],[])
+
+    def test_unexpected_host_reported_mac_not_adopted(self):
+        self.status['mongo1']['mac']='00155D999999'
+        self.assertEqual(lab.arp_addresses(self.cfg,self.status,self.arp)['mongo1'],[])
+
+    def test_existing_kvp_address_not_overridden(self):
+        self.status['mongo1']['ips']=['192.168.1.137']
+        merged=lab.with_arp_fallback(self.cfg,self.status,self.arp)
+        self.assertEqual(merged['mongo1']['ips'],['192.168.1.137'])
+
+    def test_fallback_does_not_modify_original_status(self):
+        lab.with_arp_fallback(self.cfg,self.status,self.arp)
+        self.assertEqual(self.status['mongo1']['ips'],[])
+
+    def test_seed_uses_udev_start_without_static_enable(self):
+        test=LabTest(); test.setUp()
+        try:
+            seed=lab.seed_documents(test.cfg,'mongo1')
+            cloud=json.loads(seed['user-data'].split('\n',1)[1])
+            command=cloud['runcmd'][0]
+            self.assertEqual(command[:2],['sh','-ec'])
+            self.assertIn('udevadm trigger',command[2])
+            self.assertNotIn('enable --now',command[2])
+        finally: test.tmp.cleanup()
